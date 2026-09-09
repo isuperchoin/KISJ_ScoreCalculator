@@ -967,12 +967,12 @@ class PreviewDialog:
     def _render_pages(self, kind, document):
         """Draw the report on to-scale pages, paged exactly as the file will be.
 
-        The PDF is A4 portrait, so the preview shows whole A4 portrait sheets
-        - same proportions, same margins, same page breaks, same type sizes -
-        sized so that a full sheet is visible at once rather than cropped by
-        the window. The JPG is one tall page, so it gets one tall sheet.
+        Both formats are A4 portrait - the JPG holds the same sheets as the
+        PDF, one under the next - so the preview shows whole A4 sheets with the
+        same proportions, margins, page breaks and type sizes, sized so that a
+        full sheet is visible at once rather than cropped by the window.
         """
-        pages = grade_export.placed_pages(document, single_page=kind == "jpg")
+        pages = grade_export.placed_pages(document)
         self._pages = (pages, kind)
 
         vertical = ttk.Scrollbar(self.body, orient="vertical")
@@ -1005,7 +1005,7 @@ class PreviewDialog:
 
         width_points, height_points = pages[0][0], pages[0][1]
         page_width = width - self.PAGE_SURROUND
-        if kind != "jpg" and self.fit_page:
+        if self.fit_page:
             # A whole page, not a cropped band of one: the sheet has to fit the
             # window's height as well as its width, or it does not read as A4.
             fitted = (height - self.PAGE_CAPTION) * width_points / height_points
@@ -1066,9 +1066,10 @@ class PreviewDialog:
 
     @staticmethod
     def _page_caption(kind, index, total):
-        if kind == "jpg":
-            return "One image, A4 wide - the whole report on a single page"
-        return "Page %d of %d  -  A4 portrait (210 x 297 mm)" % (index, total)
+        sheet = "Page %d of %d  -  A4 portrait (210 x 297 mm)" % (index, total)
+        if kind == "jpg" and total > 1:
+            return sheet + ", all in the one image"
+        return sheet
 
     def _bind_preview_wheel(self, canvas):
         """Scroll the preview, not the window behind it.

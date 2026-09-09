@@ -310,7 +310,7 @@ MONO_SIZE = 8.0
 MONO_WIDTH = MONO_SIZE * 0.6                # Courier advance width
 
 
-def write_pdf(path, doc, single_page=False, scale=1.0):
+def write_pdf(path, doc, stacked=False, scale=1.0):
     """Write the report.
 
     scale enlarges the page itself rather than the drawing inside it, so a
@@ -318,7 +318,9 @@ def write_pdf(path, doc, single_page=False, scale=1.0):
     up a 72-dpi bitmap afterwards, which is what --resampleWidth does, only
     produces a blurry version of the same small render.
     """
-    pages = _paginate(_layout(doc), single_page)
+    pages = _paginate(_layout(doc))
+    if stacked:
+        pages = _stack(pages)
     with io.open(path, "wb") as handle:
         handle.write(_pdf_bytes(pages, scale))
     return path
@@ -346,7 +348,7 @@ def _layout(doc):
 
 
 def _line_capacity():
-    return int((PAGE_WIDTH - 2 * MARGIN) / (MONO_WIDTH * FIT_SQUEEZE))
+    return int((PAGE_WIDTH - 2 * MARGIN) / MONO_WIDTH)
 
 
 def _text_widths(table):
@@ -384,77 +386,15 @@ STYLE = {"title": ("F2", 17), "subtitle": ("F1", 9.5), "heading": ("F2", 12),
          "rule": ("F3", MONO_SIZE), "gap": ("F1", 1)}
 
 
-# Fitting the report to the sheet.
+# Laying the report out on the sheet.
 #
-# The lines above describe the report at its natural size. A short report drawn
-# that way sits in the top-left corner of an A4 sheet with two thirds of the
-# paper empty, so the whole thing is scaled until either the widest line
-# reaches the side margins or the text reaches the foot of the page, and any
-# room still left over is shared out between the tables.
-#
-# FIT_MIN is how far the type may be shrunk to save a whole sheet. A report too
-# wide for the page shrinks further still, as far as FIT_SQUEEZE, rather than
-# lose its right-hand columns to truncation - a portrait page is narrow, and a
-# wide table is better small than cut off.
-FIT_MIN, FIT_MAX = 0.8, 1.9
-FIT_SQUEEZE = 0.65
-
-# Average advance width per point of type size, used only to measure how wide
-# a line will be. Courier is exact; the Helvetica figures are close enough for
-# headings, which are never the widest line on the page.
-CHAR_WIDTH = {"F1": 0.52, "F2": 0.58, "F3": 0.60, "F4": 0.60}
-
-# What to do with the room left on a page once the type is as large as the
-# width allows - which is the usual case on a portrait sheet, where a wide
-# table reaches the side margins long before the text reaches the foot of the
-# page. The space goes first into the spacing between the lines, then into the
-# gaps between tables, and last into pushing the first line down. Each is
-# capped, so a report of three lines is not spread over a whole sheet.
-LINE_STRETCH = 0.8                          # up to 1.8x the normal line spacing
-GAP_STRETCH, TOP_DROP = 45.0, 90.0
-
-
-def _natural_size(items):
-    """(widest line, total height) of the report at its natural size."""
-    width = 0.0
-    height = 0.0
-    for kind, text in items:
-        height += LEADING[kind]
-        if text:
-            font, size = STYLE[kind]
-            width = max(width, len(text) * size * CHAR_WIDTH[font])
-    return width, height
-
-
-def _fit(items, single_page):
-    """(scale, left edge) that makes the report fill the printable area.
-
-    Type grows until the widest line reaches the side margins, then shrinks
-    again only where a smaller size saves a whole sheet - a report that needs
-    two pages either way is better read large across two full pages than small
-    across two half-empty ones.
-    """
-    printable_width = PAGE_WIDTH - 2 * MARGIN
-    width, _height = _natural_size(items)
-
-    widest_fit = printable_width / width if width else FIT_MAX
-    scale = max(FIT_SQUEEZE, min(FIT_MAX, widest_fit))
-
-    if not single_page:
-        floor = max(FIT_SQUEEZE, min(FIT_MIN, scale))
-        candidates = []
-        step = scale
-        while step > floor:
-            candidates.append(step)
-            step -= 0.05
-        candidates.append(floor)
-        counts = [(len(_split_pages(items, size)), -size) for size in candidates]
-        scale = -min(counts)[1]
-
-    # The tables keep their own alignment, so the block is centred as a whole
-    # rather than line by line.
-    left = MARGIN + max(0.0, (printable_width - width * scale) / 2.0)
-    return scale, left
+# Everything sits at a fixed size in a fixed place: the title at the top margin
+# of the first page, the lines one under the next at the spacing set out in
+# LEADING above, and the left edge of every line at the left margin. Adding a
+# class adds lines to the foot of the report and, when the page is full, a
+# further sheet - it never moves or resizes what came before it. A short report
+# therefore leaves the lower part of its last sheet empty, which is the price
+# of every report being set identically.
 
 
 def _blocks(items):
@@ -478,20 +418,16 @@ def _blocks(items):
 ORPHAN_ROWS = 4
 
 
-def _split_pages(items, scale, target=None):
+def _split_pages(items):
     """Break (kind, text) lines into one list per A4 page.
 
-    A table is kept whole wherever it fits on a page of its own, so a sheet
-    never ends with one stray row of the next class.
-
-    target, when given, is the height each page should aim to carry. Pages then
-    also break between tables once they hold that much, which shares a report
-    evenly over its sheets instead of filling the first one and leaving the
-    last nearly blank.
+    Lines simply run from the top of a page to the bottom and on to the next
+    sheet. The one refinement is that a table which would fit on a page of its
+    own is moved there whole, rather than leaving one stray row behind.
     """
     limit = PAGE_HEIGHT - 2 * MARGIN
-    # Half a point of tolerance throughout: a report scaled to exactly fill the
-    # page would otherwise drop its last line onto a sheet of its own.
+    # Half a point of tolerance: a report that exactly fills the page would
+    # otherwise drop its last line onto a sheet of its own.
     slack = 0.5
     pages, page, used = [], [], 0.0
 
@@ -500,12 +436,10 @@ def _split_pages(items, scale, target=None):
         return [], 0.0, block[1:] if block and block[0][0] == "gap" else block
 
     for block in _blocks(items):
-        height = sum(LEADING[kind] * scale for kind, _text in block)
-        whole_table_moves = used + height > limit + slack and height <= limit + slack
-        evening_out = target is not None and used >= target
-        if page and (whole_table_moves or evening_out):
+        height = sum(LEADING[kind] for kind, _text in block)
+        if page and used + height > limit + slack and height <= limit + slack:
             page, used, block = start_new_page(block)
-            height = sum(LEADING[kind] * scale for kind, _text in block)
+            height = sum(LEADING[kind] for kind, _text in block)
 
         if used + height <= limit + slack:
             page.extend(block)
@@ -514,68 +448,53 @@ def _split_pages(items, scale, target=None):
 
         # Longer than a whole page: lay it out line by line.
         for index, (kind, text) in enumerate(block):
-            needed = LEADING[kind] * scale
+            needed = LEADING[kind]
             if kind == "heading":
                 # Take the heading over with its first rows or not at all.
-                needed += sum(LEADING[next_kind] * scale
+                needed += sum(LEADING[next_kind]
                               for next_kind, _t in block[index + 1:index + 1 + ORPHAN_ROWS])
             if page and used + needed > limit + slack:
                 page, used, _block = start_new_page([])
                 if kind == "gap":
                     continue        # a gap at the top of a page is a blank line
             page.append((kind, text))
-            used += LEADING[kind] * scale
+            used += LEADING[kind]
 
     pages.append(page)
     return [page for page in pages if page]
 
 
-def _place(items, scale, left, top, extra_gap=0.0, stretch=1.0):
+def _place(items, top):
     """Position (kind, text) lines down a page from `top`, as PDF text runs."""
     placed, y = [], top
     for kind, text in items:
-        y -= LEADING[kind] * scale * stretch
-        if kind == "gap":
-            y -= extra_gap
+        y -= LEADING[kind]
         if text:
             font, size = STYLE[kind]
-            placed.append((left, y, font, size * scale, text))
+            placed.append((MARGIN, y, font, size, text))
     return placed
 
 
-def _place_page(items, scale, left):
-    """Place one page, spreading whatever room is left down the sheet."""
-    limit = PAGE_HEIGHT - 2 * MARGIN
-    used = sum(LEADING[kind] * scale for kind, _text in items)
-
-    stretch = min(1.0 + LINE_STRETCH, limit / used) if used else 1.0
-    slack = max(0.0, limit - used * stretch)
-    gaps = sum(1 for kind, _text in items if kind == "gap")
-
-    extra_gap = min(slack / gaps, GAP_STRETCH * scale) if gaps else 0.0
-    drop = min((slack - extra_gap * gaps) / 2.0, TOP_DROP * scale)
-    return _place(items, scale, left, PAGE_HEIGHT - MARGIN - drop, extra_gap, stretch)
+def _paginate(items):
+    """Return [(page height, [(x, y, font, size, text), ...]), ...]."""
+    return [(PAGE_HEIGHT, _place(page, PAGE_HEIGHT - MARGIN))
+            for page in _split_pages(items)]
 
 
-def _paginate(items, single_page):
-    """Return [(page height, [(x, y, font, size, text), ...]), ...].
+def _stack(pages):
+    """The pages laid end to end as one tall page, for the JPG.
 
-    The report is scaled to the sheet rather than drawn at a fixed size in the
-    corner of it: see _fit() and _place_page().
+    The JPG is a single image, but it is an image of A4 sheets: the same pages
+    the PDF has, in the same order, one under the next.
     """
-    scale, left = _fit(items, single_page)
-    if single_page:
-        height = 2 * MARGIN + sum(LEADING[kind] * scale for kind, _text in items)
-        return [(max(height, 200),
-                 _place(items, scale, left, height - MARGIN))]
-
-    pages = _split_pages(items, scale)
-    if len(pages) > 1:
-        total = sum(LEADING[kind] * scale for kind, _text in items)
-        evened = _split_pages(items, scale, total / len(pages))
-        if len(evened) == len(pages):       # never at the cost of another sheet
-            pages = evened
-    return [(PAGE_HEIGHT, _place_page(page, scale, left)) for page in pages]
+    total = sum(height for height, _lines in pages)
+    lines, top = [], total
+    for height, page_lines in pages:
+        base = top - height          # PDF y is measured up from the page foot
+        lines.extend((x, y + base, font, size, text)
+                     for x, y, font, size, text in page_lines)
+        top = base
+    return [(total, lines)]
 
 
 def _pdf_escape(text):
@@ -656,7 +575,7 @@ def write_jpg(path, doc, pixel_width=A4_JPG_WIDTH):
     handle, temp_pdf = tempfile.mkstemp(suffix=".pdf")
     os.close(handle)
     try:
-        write_pdf(temp_pdf, doc, single_page=True,
+        write_pdf(temp_pdf, doc, stacked=True,
                   scale=float(pixel_width) / PAGE_WIDTH)
         result = subprocess.run(
             ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "best",
@@ -676,7 +595,7 @@ def write_jpg(path, doc, pixel_width=A4_JPG_WIDTH):
 # ---------------------------------------------------------------------------
 
 def page_count(doc):
-    return len(_paginate(_layout(doc), False))
+    return len(_paginate(_layout(doc)))
 
 
 def layout_blocks(doc):
@@ -684,17 +603,17 @@ def layout_blocks(doc):
     return _layout(doc)
 
 
-def placed_pages(doc, single_page=False):
+def placed_pages(doc):
     """The report drawn to scale, for a preview that looks like the real page.
 
     Returns [(page width, page height, [(x, y from the top, font, size, text),
     ...]), ...] in points, with y measured downwards from the top-left corner
-    the way a screen canvas measures it. single_page gives the one tall page
-    the JPG uses.
+    the way a screen canvas measures it. The JPG holds these same pages, one
+    under the next, so the preview is the same either way.
     """
     names = dict(FONTS)
     pages = []
-    for height, lines in _paginate(_layout(doc), single_page):
+    for height, lines in _paginate(_layout(doc)):
         pages.append((PAGE_WIDTH, height,
                       [(x, height - y, names[font], size, text)
                        for x, y, font, size, text in lines]))
@@ -749,8 +668,11 @@ def describe(kind, doc):
         return "%d page%s, A4 portrait (210 x 297 mm), text you can select and search." % (
             pages, "" if pages == 1 else "s")
     if kind == "jpg":
-        return ("One tall image, %d pixels wide (A4 width at 200 dpi) - the whole "
-                "report on a single page." % A4_JPG_WIDTH)
+        pages = page_count(doc)
+        held = ("the whole A4 page" if pages == 1
+                else "all %d A4 pages, one under the next" % pages)
+        return "One image %d pixels wide (A4 width at 200 dpi), holding %s." % (
+            A4_JPG_WIDTH, held)
     if kind == "xlsx":
         names = ", ".join(table["name"] for table in doc["tables"])
         return "%d sheets (%s). Scores are real numbers, so Excel can calculate with them." % (
