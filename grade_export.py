@@ -10,6 +10,9 @@ to Google Sheets) with no third-party libraries:
             laid out on A4 portrait pages.
   * JPG   - a one-page, A4-wide PDF rasterized by macOS `sips`.
 
+Every report ends with a "Scores entered" table listing each score as typed,
+so grade_import can read the file back into the calculator later.
+
 A "document" is the plain dictionary produced by build_document():
 
     {"title": str,
@@ -98,6 +101,8 @@ def build_document(reports, letter_and_gpa, average, quarter_count):
             "bold_rows": bold_rows,
         })
 
+    tables.append(_entered_table(reports, quarter_count))
+
     return {
         "title": "KISJ Grade Report",
         "subtitle": "Generated %s  -  Formative 20%% / Summative 80%%  -  "
@@ -108,6 +113,53 @@ def build_document(reports, letter_and_gpa, average, quarter_count):
 
 def _round(value):
     return None if value is None else round(value, 2)
+
+
+# The "Scores entered" table lists every score exactly as it was typed, one
+# row per class, quarter and category. It is what lets a saved report be
+# imported back into the calculator later (see grade_import) and picked up
+# where it was left; the averages above it are not enough to rebuild the
+# individual scores.
+
+ENTERED_HEADERS = ["Class", "Quarter", "Category", "Scores"]
+
+
+def _entered_table(reports, quarter_count):
+    # The PDF sets each row on one monospaced line. A long list of scores is
+    # therefore continued on further rows with the same class, quarter and
+    # category, rather than cut off at the right margin.
+    name_width = max([len(ENTERED_HEADERS[0])] + [len(name) for name, _r in reports])
+    room = _line_capacity() - (name_width + len("Quarter 1") + len("Summative")
+                               + 3 * 2)
+    room = max(12, room)
+
+    rows = []
+    for name, report in reports:
+        entered = report.get("entered", {})
+        for number in range(1, quarter_count + 1):
+            formatives, summatives = entered.get(number, ([], []))
+            for category, scores in (("Formative", formatives), ("Summative", summatives)):
+                for chunk in _score_chunks(scores, room):
+                    rows.append([name, "Quarter %d" % number, category, chunk])
+    return {"name": "Scores entered", "headers": list(ENTERED_HEADERS),
+            "rows": rows, "bold_rows": set()}
+
+
+def _score_chunks(scores, room):
+    """"90, 85, 77" split into pieces no longer than `room` characters."""
+    if not scores:
+        return [None]
+    chunks, current = [], ""
+    for score in scores:
+        piece = str(score)
+        joined = piece if not current else current + ", " + piece
+        if current and len(joined) > room:
+            chunks.append(current)
+            current = piece
+        else:
+            current = joined
+    chunks.append(current)
+    return chunks
 
 
 # ---------------------------------------------------------------------------

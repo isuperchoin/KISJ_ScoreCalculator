@@ -86,6 +86,7 @@ def main():
         "--add-data", os.path.join(HERE, "kiscore_icon.gif") + ":.",
         "--paths", HERE,
         "--hidden-import", "grade_export",
+        "--hidden-import", "grade_import",
         "--workpath", os.path.join(WORK, "build"),
         "--distpath", os.path.join(WORK, "dist"),
         "--specpath", WORK,

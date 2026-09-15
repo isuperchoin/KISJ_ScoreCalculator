@@ -6,7 +6,8 @@ A step-by-step desktop app that turns quarter-by-quarter formative/summative
 scores into percentage scores, letter grades, and GPA -- for one class or for
 several at once.
 
-    Page 1  Pick your classes (as many as you like)
+    Page 1  Pick your classes (as many as you like) - or import a saved
+            report and have everything below filled in
     Page 2  Say how many quarters you have completed
     Page 3  Enter scores, one page per class
     Page 4  All results together
@@ -25,6 +26,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import grade_export
+import grade_import
 
 # ---------------------------------------------------------------------------
 # Course catalog (KISJ High School Course Guide 2026-2027)
@@ -192,6 +194,10 @@ BG = "#f4f6f9"
 CARD = "#ffffff"
 BAND = "#eaf0f8"
 LINE = "#dde3ea"
+IMPORTED_BG = "#eaf6ee"      # a score box filled from an imported report
+NOTE_BG = "#e6f2ea"          # green band: scores came from a saved report
+WARN_BG = "#fdf3d8"          # amber band: they were only approximated
+WARN_FG = "#7a5c12"
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +258,8 @@ def summarize(quarter_data):
     """Build one class's report.
 
     quarter_data maps quarter number -> (formative scores, summative scores).
-    Returns a dict with per-quarter rows, semester rows, and the overall total.
+    Returns a dict with per-quarter rows, semester rows, the overall total, and
+    the scores as entered (which the saved report lists so it can be imported).
     """
     quarters = {}
     rows = []
@@ -288,7 +295,10 @@ def summarize(quarter_data):
         rows.append({"period": label, "formative": None, "summative": None,
                      "score": total, "note": "average of all quarters entered"})
 
-    return {"rows": rows, "quarters": quarters, "semesters": semesters, "total": total}
+    entered = {number: (list(formatives), list(summatives))
+               for number, (formatives, summatives) in quarter_data.items()}
+    return {"rows": rows, "quarters": quarters, "semesters": semesters, "total": total,
+            "entered": entered}
 
 
 # ---------------------------------------------------------------------------
@@ -415,12 +425,152 @@ class TextButton:
         return self
 
 
+class SmoothScroll:
+    """Pixel-precise, eased vertical scrolling for a canvas.
+
+    A canvas scrolls in "units" - a tenth of the window at a time - and that
+    is what every wheel notch, arrow key and trackpad event used to do here,
+    so the page moved in visible jumps. Instead:
+
+      * A trackpad (or Magic Mouse) reports how many pixels the fingers moved,
+        and the page follows them exactly, every event, the way Tk's own text
+        widget does. The system already smooths and adds momentum to that
+        stream, so nothing is animated on top of it.
+      * A wheel notch or a key press names a distance, and the page glides
+        there over a few frames, easing out, rather than landing at once.
+        Notches arriving during a glide extend it.
+
+    Scrolling is done with yview_moveto rather than a 1-pixel scroll
+    increment, so scrollbar arrows keep their usual step where a platform
+    still draws them.
+    """
+
+    FRAME_MS = 15         # ~66 frames a second
+    EASE = 0.3            # share of the remaining distance covered per frame
+    NOTCH = 72            # pixels per wheel notch or arrow key
+    MAC_WHEEL = 15        # Tk 8.6 on macOS: pixels per unit of wheel delta
+
+    def __init__(self, canvas):
+        self.canvas = canvas
+        self.remaining = 0.0
+        self.job = None
+
+    # -- geometry ------------------------------------------------------------
+
+    def _extent(self):
+        """Height of the scrollable area in pixels, or 0 if nothing scrolls."""
+        try:
+            region = str(self.canvas.cget("scrollregion")).split()
+            height = float(region[3]) - float(region[1])
+        except (IndexError, ValueError, tk.TclError):
+            return 0.0
+        first, last = self.canvas.yview()
+        if first <= 0.0 and last >= 1.0:
+            return 0.0
+        return height
+
+    def _offset(self):
+        return self.canvas.yview()[0] * self._extent()
+
+    def page_height(self):
+        return max(1, self.canvas.winfo_height() - 40)
+
+    # -- moving --------------------------------------------------------------
+
+    def move(self, pixels):
+        """Scroll by this many pixels right now (positive = down)."""
+        self.stop()
+        self._apply(pixels)
+
+    def _apply(self, pixels):
+        extent = self._extent()
+        if extent <= 0.0 or not pixels:
+            return
+        fraction = self.canvas.yview()[0] + pixels / extent
+        self.canvas.yview_moveto(max(0.0, min(1.0, fraction)))
+
+    def glide(self, pixels):
+        """Scroll by this many pixels smoothly over the next few frames."""
+        if self._extent() <= 0.0:
+            return
+        self.remaining += pixels
+        if self.job is None:
+            self._step()
+
+    def glide_to(self, offset):
+        """Glide so that `offset` pixels of the content sit above the top."""
+        self.glide(offset - self._offset() - self.remaining)
+
+    def _step(self):
+        self.job = None
+        if not self.canvas.winfo_exists():
+            return
+        step = self.remaining * self.EASE
+        if abs(self.remaining) <= 1.5:      # last frame: land exactly
+            step = self.remaining
+        elif abs(step) < 1.0:               # never crawl below a pixel a frame
+            step = 1.0 if self.remaining > 0 else -1.0
+        self._apply(step)
+        self.remaining -= step
+        if self.remaining:
+            self.job = self.canvas.after(self.FRAME_MS, self._step)
+
+    def stop(self):
+        if self.job is not None:
+            try:
+                self.canvas.after_cancel(self.job)
+            except tk.TclError:
+                pass
+            self.job = None
+        self.remaining = 0.0
+
+    # -- events --------------------------------------------------------------
+
+    def wheel(self, event):
+        """<MouseWheel>. Tk 8.6 on macOS sends the trackpad's own small
+        deltas at high speed, which are followed directly; everywhere else
+        (and on Tk 9 for a real wheel) a notch is a multiple of 120."""
+        delta = event.delta
+        if delta == 0:
+            return
+        if sys.platform == "darwin" and float(tk.TkVersion) < 8.7:
+            self.move(-delta * self.MAC_WHEEL)
+        else:
+            notches = delta / 120.0 if abs(delta) >= 120 else (1 if delta > 0 else -1)
+            self.glide(-notches * self.NOTCH)
+
+    def buttons(self, direction):
+        """X11 reports the wheel as <Button-4> (up) and <Button-5> (down)."""
+        self.glide(direction * self.NOTCH)
+
+    def touchpad(self, event):
+        """<TouchpadScroll> on Tk 9: the exact distance the fingers moved."""
+        try:
+            _across, down = self.canvas.tk.call("tk::PreciseScrollDeltas", event.delta)
+        except tk.TclError:
+            return
+        if down:
+            self.move(-float(down))
+
+    def bind_local(self, widget, bind_touchpad):
+        """Bind the wheel and trackpad on one widget, stopping the events
+        there so the window underneath does not scroll as well."""
+        widget.bind("<MouseWheel>", lambda e: (self.wheel(e), "break")[1])
+        widget.bind("<Shift-MouseWheel>", lambda e: (self.wheel(e), "break")[1])
+        widget.bind("<Button-4>", lambda _e: (self.buttons(-1), "break")[1])
+        widget.bind("<Button-5>", lambda _e: (self.buttons(1), "break")[1])
+        bind_touchpad(widget, lambda e: (self.touchpad(e), "break")[1])
+
+
 class AssessmentRow:
     """One score entry: a numbered box, an error message, and a remove button."""
 
     def __init__(self, parent, category, on_remove):
         self.category = category
         self.on_remove = on_remove
+        # True while the box still holds a value read from a saved report; the
+        # tint tells the user which numbers they have not yet looked at.
+        self.imported = False
 
         self.frame = tk.Frame(parent, bg=CARD)
         self.frame.pack(fill="x", pady=1)
@@ -450,8 +600,22 @@ class AssessmentRow:
         # interpreter that keeps this row alive even after the widget is gone,
         # so dispose() must remove it - see the dispose chain below.
         self._trace = self.var.trace_add("write", lambda *_: self.check())
+        self.entry.bind("<KeyPress>", self._touched)
         self.entry.bind("<KeyRelease>", lambda _e: self.check())
         self.entry.bind("<FocusOut>", lambda _e: self.check())
+
+    def set_value(self, text, imported=False):
+        """Fill the box programmatically (from a saved report, or when the
+        page is rebuilt); the trace repaints it."""
+        self.imported = imported
+        self.var.set(text)
+
+    def _touched(self, event):
+        """The user typed here: whatever was imported is now theirs."""
+        edits = event.char.isprintable() or event.keysym in ("BackSpace", "Delete")
+        if self.imported and edits:
+            self.imported = False
+            self.check()
 
     def _remove(self):
         self.dispose()
@@ -480,7 +644,8 @@ class AssessmentRow:
             self.entry.config(highlightbackground=RED, highlightcolor=RED, bg="#fff5f4")
         else:
             self.error.config(text="")
-            self.entry.config(highlightbackground="#c9d3de", highlightcolor=ACCENT, bg="white")
+            self.entry.config(highlightbackground="#c9d3de", highlightcolor=ACCENT,
+                              bg=IMPORTED_BG if self.imported else "white")
         return value, error
 
     def focus(self):
@@ -532,6 +697,23 @@ class CategoryBlock:
             row.dispose()
         self.rows = []
 
+    def set_scores(self, entries):
+        """Replace every box with one per entry: (text, imported) pairs."""
+        self.dispose()
+        for text, imported in entries:
+            row = AssessmentRow(self.rows_holder, self.category, self._on_remove)
+            self.rows.append(row)
+            row.set_value(text, imported)
+        if not self.rows:            # always keep at least one box
+            self.add_row(focus=False)
+        else:
+            self._renumber()
+
+    def snapshot(self):
+        """(text, imported) for every box that has something in it."""
+        return [(row.var.get(), row.imported) for row in self.rows
+                if row.var.get().strip()]
+
     def collect(self):
         """Returns (scores, first_bad_row). first_bad_row is None when all valid."""
         scores = []
@@ -566,6 +748,13 @@ class QuarterBlock:
         formatives, bad_f = self.formative.collect()
         summatives, bad_s = self.summative.collect()
         return formatives, summatives, (bad_f or bad_s)
+
+    def fill(self, formatives, summatives):
+        self.formative.set_scores(formatives)
+        self.summative.set_scores(summatives)
+
+    def snapshot(self):
+        return self.formative.snapshot(), self.summative.snapshot()
 
     def dispose(self):
         self.formative.dispose()
@@ -625,10 +814,13 @@ class ClassesPage(Page):
     HEADER_PREFIX = "─── "
     title = "Step 1  ·  Which classes are you taking?"
     subtitle = ("Pick a department to shorten the list, choose a class, then press "
-                "Add class. Repeat for every class you want to calculate.")
+                "Add class. Repeat for every class you want to calculate - or "
+                "import a report you saved earlier and skip the typing.")
 
     def __init__(self, app, parent):
         Page.__init__(self, app, parent)
+
+        self._build_import_card()
 
         picker = self.card()
 
@@ -667,6 +859,32 @@ class ClassesPage(Page):
 
         self._refresh_course_list()
         self._render_list()
+
+    # -- importing a saved report -------------------------------------------
+
+    def _build_import_card(self):
+        card = self.card()
+        tk.Label(card, text="Continue from a saved report", bg=CARD, fg=ACCENT,
+                 font=("Helvetica", 13, "bold")).pack(anchor="w")
+        tk.Label(card, text="Saved your results before? Import that file and every "
+                            "class, quarter and score is filled in for you. Then fix "
+                            "what was wrong or add what is new.",
+                 bg=CARD, fg=MUTED, anchor="w", justify="left",
+                 wraplength=860).pack(anchor="w", pady=(2, 8))
+        row = tk.Frame(card, bg=CARD)
+        row.pack(anchor="w")
+        AccentButton(row, "Import previous result...", self.app.import_report,
+                     font=("Helvetica", 11, "bold"), padx=14, pady=6).pack(side="left")
+        shortcut = "\u2318O" if sys.platform == "darwin" else "Ctrl+O"
+        tk.Label(row, text="PDF  \u00b7  JPG  \u00b7  Excel (.xlsx)  \u00b7  CSV / Google "
+                           "Sheets       %s" % shortcut,
+                 bg=CARD, fg=MUTED).pack(side="left", padx=(14, 0))
+        self.import_status = tk.Label(card, text="", bg=CARD, fg=GREEN, anchor="w",
+                                      justify="left", wraplength=860)
+        self.import_status.pack(anchor="w", pady=(6, 0))
+
+    def set_import_status(self, text):
+        self.import_status.config(text=text)
 
     # -- course dropdown ----------------------------------------------------
 
@@ -804,8 +1022,114 @@ class ScoresPage(Page):
                          % (index, total))
         Page.__init__(self, app, parent)
 
+        # Which class this page is for, and every other class one click away:
+        # the name is repeated here, large, so that after an import (or a jump
+        # between classes) there is never any doubt whose scores these are.
+        self._build_class_strip()
+
+        # Shown only when the scores below came from an imported report.
+        self.import_note = None
+        self.note_frame = tk.Frame(self.body, bg=NOTE_BG, bd=1, relief="solid",
+                                   highlightbackground=LINE)
+        self.note_label = tk.Label(self.note_frame, text="", bg=NOTE_BG, fg=GREEN,
+                                   anchor="w", justify="left", wraplength=860)
+        self.note_label.pack(anchor="w", padx=12, pady=8)
+
         holder = self.card()
+        self.scores_card = holder.master
         self.quarter_blocks = [QuarterBlock(holder, n + 1) for n in range(quarter_count)]
+
+    # -- which class is this --------------------------------------------------
+
+    def _build_class_strip(self):
+        strip = tk.Frame(self.body, bg=ACCENT)
+        strip.pack(fill="x", pady=(0, 12))
+        top = tk.Frame(strip, bg=ACCENT)
+        top.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Label(top, text="NOW ENTERING", bg=ACCENT, fg="#c8d8f0",
+                 font=("Helvetica", 9, "bold")).pack(anchor="w")
+        tk.Label(top, text=self.class_name, bg=ACCENT, fg="white", anchor="w",
+                 justify="left", wraplength=860,
+                 font=("Helvetica", 20, "bold")).pack(anchor="w")
+        self.chip_holder = tk.Frame(strip, bg=ACCENT)
+        self.chip_holder.pack(fill="x", padx=10, pady=(2, 10))
+
+    CHIP_ROW_WIDTH = 900
+
+    def refresh_class_strip(self):
+        """One chip per class: this one lit, the others clickable. Chips flow
+        on to further rows rather than run off the right-hand edge."""
+        for child in self.chip_holder.winfo_children():
+            child.destroy()
+        row, used = None, self.CHIP_ROW_WIDTH
+        for position, page in enumerate(self.app.score_pages):
+            current = page is self
+            done = page.has_scores()
+            text = "%d  %s" % (position + 1, page.class_name)
+            if current:
+                text = "\u25b6  " + text
+            elif done:
+                text = "\u2713  " + text
+            font = ("Helvetica", 11, "bold" if current else "normal")
+            width = tkfont.Font(font=font).measure(text) + 28
+            if row is None or used + width > self.CHIP_ROW_WIDTH:
+                row = tk.Frame(self.chip_holder, bg=ACCENT)
+                row.pack(fill="x")
+                used = 0
+            used += width
+            chip = tk.Label(row, text=text, padx=10, pady=3, font=font,
+                            bg="white" if current else "#2f5187",
+                            fg=ACCENT if current else ("#dfe9f7" if done else "#aebdd3"),
+                            cursor="arrow" if current else "hand2")
+            chip.pack(side="left", padx=4, pady=2)
+            if not current:
+                chip.bind("<Enter>", lambda _e, c=chip: c.config(bg="#3d64a3", fg="white"))
+                chip.bind("<Leave>", lambda _e, c=chip, f=chip.cget("fg"):
+                          c.config(bg="#2f5187", fg=f))
+                chip.bind("<ButtonRelease-1>",
+                          lambda _e, i=position: self.app.jump_to_class(i))
+
+    def on_enter(self):
+        self.refresh_class_strip()
+
+    # -- filling in from a saved report ---------------------------------------
+
+    def fill(self, quarter_data, imported=False):
+        """quarter_data maps quarter number -> (formatives, summatives), each a
+        list of scores or of (text, imported) pairs."""
+        for block in self.quarter_blocks:
+            formatives, summatives = quarter_data.get(block.number, ([], []))
+            block.fill(self._entries(formatives, imported),
+                       self._entries(summatives, imported))
+
+    @staticmethod
+    def _entries(values, imported):
+        entries = []
+        for value in values:
+            if isinstance(value, tuple):
+                entries.append((str(value[0]), bool(value[1])))
+            else:
+                entries.append((str(value), imported))
+        return entries
+
+    def snapshot(self):
+        """Everything typed so far, so the page can be rebuilt without loss."""
+        return {block.number: block.snapshot() for block in self.quarter_blocks}
+
+    def has_scores(self):
+        return any(block.formative.snapshot() or block.summative.snapshot()
+                   for block in self.quarter_blocks)
+
+    def set_import_note(self, text, warning=False):
+        self.import_note = (text, warning)
+        bg, fg = (WARN_BG, WARN_FG) if warning else (NOTE_BG, GREEN)
+        self.note_frame.config(bg=bg)
+        self.note_label.config(text=text, bg=bg, fg=fg)
+        self.note_frame.pack(fill="x", pady=(0, 12), before=self.scores_card)
+
+    def clear_import_note(self):
+        self.import_note = None
+        self.note_frame.pack_forget()
 
     def collect(self):
         """Returns (quarter_data, first_bad_quarter_number, first_bad_row)."""
@@ -1072,40 +1396,10 @@ class PreviewDialog:
         return sheet
 
     def _bind_preview_wheel(self, canvas):
-        """Scroll the preview, not the window behind it.
-
-        The main window binds the wheel with bind_all and those handlers
-        scroll the main canvas, so without bindings here - each returning
-        "break" - a scroll over the preview moves the window underneath it
-        instead. That is what a trackpad did: it reached the app's own
-        <TouchpadScroll> handler, which scrolls the page behind the preview.
-        """
-        def scroll(amount):
-            canvas.yview_scroll(amount, "units")
-            return "break"
-
-        def wheel(event):
-            delta = event.delta
-            if delta == 0:
-                return "break"
-            steps = int(delta / 120) if abs(delta) >= 120 else (1 if delta > 0 else -1)
-            return scroll(-steps)
-
-        def touchpad(event):
-            """Tk 9 reports a Mac trackpad as <TouchpadScroll>, not the wheel."""
-            if event.serial % self.app.TOUCHPAD_INTERVAL:
-                return "break"
-            try:
-                _across, down = canvas.tk.call("tk::PreciseScrollDeltas", event.delta)
-            except tk.TclError:
-                return "break"
-            return scroll(-int(down)) if down else "break"
-
-        canvas.bind("<MouseWheel>", wheel)
-        canvas.bind("<Shift-MouseWheel>", wheel)
-        canvas.bind("<Button-4>", lambda _e: scroll(-1))
-        canvas.bind("<Button-5>", lambda _e: scroll(1))
-        self.app._bind_touchpad(canvas, touchpad)
+        """Scroll the preview smoothly, and only the preview: the events stop
+        here rather than reaching the main window's handlers as well."""
+        self.scroller = SmoothScroll(canvas)
+        self.scroller.bind_local(canvas, self.app._bind_touchpad)
 
     def _render(self, blocks):
         """Draw the preview as text.
@@ -1198,7 +1492,8 @@ class ResultsPage(Page):
         tk.Label(card, text="Save these results", bg=CARD, fg=ACCENT,
                  font=("Helvetica", 13, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
         tk.Label(card, text="Happy with the numbers above? Pick a format - you will see "
-                            "a preview before anything is saved.",
+                            "a preview before anything is saved. Any of these files can "
+                            "be imported again later (Step 1) to pick up where you left off.",
                  bg=CARD, fg=MUTED, anchor="w", justify="left",
                  wraplength=880).pack(anchor="w", padx=14)
 
@@ -1453,6 +1748,7 @@ class GradeCalculatorApp:
         self.score_signature = None
         self.index = 0
         self._preview = None
+        self.import_source = None
 
         self._build_header()
         self._build_footer()
@@ -1465,6 +1761,8 @@ class GradeCalculatorApp:
         self.show_page(0)
         root.bind("<Return>", self._on_return_key)
         root.bind("<KP_Enter>", self._on_return_key)
+        root.bind("<Command-o>", lambda _e: self.import_report())
+        root.bind("<Control-o>", lambda _e: self.import_report())
 
     # -- chrome -------------------------------------------------------------
 
@@ -1574,15 +1872,16 @@ class GradeCalculatorApp:
         # and Tk sends the canvas a <Leave> the moment the pointer moves onto
         # any child widget - scoping the bindings to Enter/Leave tore them down
         # immediately and two-finger scrolling did nothing at all.
+        scroller = self.scroller = SmoothScroll(self.canvas)
         self._bind_wheel()
 
         # Keyboard scrolling always works, whatever the trackpad does.
-        for key, amount in (("<Up>", -1), ("<Down>", 1)):
-            self.root.bind(key, lambda _e, a=amount: self._scroll_units(a))
-        self.root.bind("<Prior>", lambda _e: self._scroll_pages(-1))
-        self.root.bind("<Next>", lambda _e: self._scroll_pages(1))
-        self.root.bind("<Home>", lambda _e: self.canvas.yview_moveto(0))
-        self.root.bind("<End>", lambda _e: self.canvas.yview_moveto(1))
+        self.root.bind("<Up>", lambda _e: scroller.glide(-scroller.NOTCH))
+        self.root.bind("<Down>", lambda _e: scroller.glide(scroller.NOTCH))
+        self.root.bind("<Prior>", lambda _e: scroller.glide(-scroller.page_height()))
+        self.root.bind("<Next>", lambda _e: scroller.glide(scroller.page_height()))
+        self.root.bind("<Home>", lambda _e: scroller.glide_to(0))
+        self.root.bind("<End>", lambda _e: scroller.glide_to(scroller._extent()))
 
     # -- scrolling ----------------------------------------------------------
 
@@ -1617,9 +1916,18 @@ class GradeCalculatorApp:
     def _bind_wheel(self, _event=None):
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Shift-MouseWheel>", self._on_mousewheel)
-        self.root.bind_all("<Button-4>", lambda _e: self._scroll_units(-1))
-        self.root.bind_all("<Button-5>", lambda _e: self._scroll_units(1))
+        self.root.bind_all("<Button-4>", lambda e: self._in_main(e) and self.scroller.buttons(-1))
+        self.root.bind_all("<Button-5>", lambda e: self._in_main(e) and self.scroller.buttons(1))
         self._bind_touchpad(self.root, self._on_touchpad, bind_all=True)
+
+    def _in_main(self, event):
+        """bind_all also hears the preview window; only the main page scrolls
+        for events that happen over the main window."""
+        widget = event.widget
+        try:
+            return widget.winfo_toplevel() is self.root
+        except (AttributeError, tk.TclError):
+            return False
 
     @staticmethod
     def _bind_touchpad(widget, handler, bind_all=False):
@@ -1638,47 +1946,18 @@ class GradeCalculatorApp:
         except tk.TclError:
             pass
 
-    # A trackpad reports a stream of small deltas per gesture. Tk's own widgets
-    # act on every fifth one, so matching that keeps this window scrolling at
-    # the same speed as every other application.
-    TOUCHPAD_INTERVAL = 5
-
     def _on_touchpad(self, event):
-        if event.serial % self.TOUCHPAD_INTERVAL:
-            return
-        try:
-            _across, down = self.root.tk.call("tk::PreciseScrollDeltas",
-                                              event.delta)
-        except tk.TclError:
-            return
-        if down:
-            self._scroll_units(-int(down))
+        if self._in_main(event):
+            self.scroller.touchpad(event)
 
     def _on_mousewheel(self, event):
-        """delta is +/-1 on macOS but +/-120 per notch on Windows."""
-        delta = event.delta
-        if delta == 0:
-            return
-        steps = int(delta / 120) if abs(delta) >= 120 else (1 if delta > 0 else -1)
-        self._scroll_units(-steps)
-
-    def _scroll_units(self, amount):
-        first, last = self.canvas.yview()
-        if first <= 0.0 and last >= 1.0:               # nothing to scroll
-            return
-        self.canvas.yview_scroll(amount, "units")
-
-    def _scroll_pages(self, amount):
-        self.canvas.yview_scroll(amount, "pages")
+        if self._in_main(event):
+            self.scroller.wheel(event)
 
     def forward_wheel(self, widget):
         """Let the page scroll even when the pointer sits on a Treeview,
         which otherwise swallows the wheel event."""
-        widget.bind("<MouseWheel>", lambda e: (self._on_mousewheel(e), "break")[1])
-        widget.bind("<Button-4>", lambda _e: (self._scroll_units(-1), "break")[1])
-        widget.bind("<Button-5>", lambda _e: (self._scroll_units(1), "break")[1])
-        self._bind_touchpad(widget,
-                            lambda e: (self._on_touchpad(e), "break")[1])
+        self.scroller.bind_local(widget, self._bind_touchpad)
 
     # -- page bookkeeping ---------------------------------------------------
 
@@ -1689,10 +1968,17 @@ class GradeCalculatorApp:
         return [self.classes_page, self.quarters_page] + self.score_pages + [self.results_page]
 
     def rebuild_score_pages(self):
-        """One score page per class. Entries are kept unless the setup changed."""
+        """One score page per class.
+
+        Nothing typed is lost when the setup changes: a class that stays on
+        the list gets its scores back, so an imported report can have a class
+        added to it - or a quarter - without retyping the rest.
+        """
         signature = (tuple(self.classes), self.quarter_count())
         if signature == self.score_signature:
             return
+        kept = {page.class_name: (page.snapshot(), page.import_note)
+                for page in self.score_pages}
         for page in self.score_pages:
             page.dispose()
         total = len(self.classes)
@@ -1700,6 +1986,12 @@ class GradeCalculatorApp:
             ScoresPage(self, self.page_holder, name, position, total, self.quarter_count())
             for position, name in enumerate(self.classes, start=1)
         ]
+        for page in self.score_pages:
+            if page.class_name in kept:
+                data, note = kept[page.class_name]
+                page.fill(data)
+                if note:
+                    page.set_import_note(*note)
         self.score_signature = signature
 
     def show_page(self, index):
@@ -1711,6 +2003,7 @@ class GradeCalculatorApp:
         page = pages[index]
         page.on_enter()
         page.show()
+        self.scroller.stop()
         self.canvas.yview_moveto(0)
         self.schedule_scrollregion()
         self.status.config(text="")
@@ -1775,11 +2068,31 @@ class GradeCalculatorApp:
         if isinstance(page, QuartersPage):
             self.rebuild_score_pages()
 
+        if isinstance(page, ScoresPage) and page is self.score_pages[-1]:
+            # The class chips let you skip ahead, so check every class before
+            # the results, not just the one on screen.
+            for other in self.score_pages:
+                if other.validate():
+                    self.show_page(pages.index(other))
+                    self.status.config(text=other.validate())
+                    return
+
         self.show_page(self.index + 1)
 
     def go_back(self):
         if self.index > 0:
             self.show_page(self.index - 1)
+
+    def jump_to_class(self, position):
+        """Switch straight to another class's score page (from the chips)."""
+        page = self.pages()[self.index]
+        if isinstance(page, ScoresPage):
+            error = page.validate()
+            if error:
+                self.status.config(text=error)
+                return
+        if 0 <= position < len(self.score_pages):
+            self.show_page(2 + position)
 
     def _on_return_key(self, _event=None):
         self.next_button.flash()
@@ -1792,7 +2105,87 @@ class GradeCalculatorApp:
         self.score_signature = None
         self.classes = []
         self.quarter_var.set(QUARTER_CHOICES[1])
+        self.import_source = None
+        self.classes_page.set_import_status("")
         self.show_page(0)
+
+    # -- importing a saved report -------------------------------------------
+
+    @staticmethod
+    def known_courses():
+        names = []
+        for courses in COURSES.values():
+            names.extend(course for course in courses if course not in names)
+        return names
+
+    def import_report(self):
+        """Read a report saved earlier and fill the whole calculator from it."""
+        path = filedialog.askopenfilename(
+            title="Import a saved report",
+            filetypes=[("Saved reports", "*.pdf *.jpg *.jpeg *.png *.xlsx *.csv"),
+                       ("PDF document", "*.pdf"), ("Picture", "*.jpg *.jpeg *.png"),
+                       ("Excel workbook", "*.xlsx"), ("CSV (Google Sheets)", "*.csv"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+
+        self.root.config(cursor="watch")
+        self.status.config(text="")
+        self.root.update_idletasks()
+        try:
+            result = grade_import.read_report(path, self.known_courses())
+        except grade_import.ReadError as error:
+            messagebox.showerror("Could not import", str(error))
+            return
+        except Exception as error:                     # keep the app alive
+            messagebox.showerror("Could not import",
+                                 "Something went wrong while reading the file:\n\n%s"
+                                 % error)
+            return
+        finally:
+            self.root.config(cursor="")
+
+        text = grade_import.summary_text(result)
+        if any(page.has_scores() for page in self.score_pages):
+            text += ("\n\nThis replaces the classes and scores you have entered "
+                     "so far.")
+        text += "\n\nFill in the calculator with these? You can fix or add to them next."
+        if not messagebox.askokcancel("Import previous result", text):
+            return
+        self.apply_import(result)
+
+    def apply_import(self, result):
+        for page in self.score_pages:
+            page.dispose()
+        self.score_pages = []
+        self.score_signature = None
+        self.classes = list(result["classes"])
+        self.quarter_var.set(QUARTER_CHOICES[result["quarter_count"] - 1])
+        self.rebuild_score_pages()
+
+        source = result["source"]
+        if result["approximate"]:
+            note = ("Imported from %s, which only listed quarter averages - each "
+                    "average was entered as one rounded score. Retype the real "
+                    "scores if you have them, then add anything new." % source)
+        else:
+            note = ("Imported from %s - the tinted boxes are the scores you saved. "
+                    "Check them, fix anything that changed, or add new assessments."
+                    % source)
+        if result["recognized"]:
+            note += " The numbers were read from a picture, so look over every one."
+        for page in self.score_pages:
+            page.fill(result["scores"].get(page.class_name, {}), imported=True)
+            page.set_import_note(note, warning=result["approximate"] or
+                                 result["recognized"])
+
+        self.import_source = source
+        self.classes_page.set_import_status(
+            "Imported %d class%s and %d quarter%s from %s." % (
+                len(self.classes), "" if len(self.classes) == 1 else "es",
+                result["quarter_count"], "" if result["quarter_count"] == 1 else "s",
+                source))
+        self.show_page(2 if self.score_pages else 0)
 
     def preview_dialog(self):
         """One reused preview window for the whole session."""
