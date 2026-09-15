@@ -21,6 +21,7 @@ The underlying calculation logic was structured based on official school syllabu
 - **GPA/Letter Grade Calculation**: Calculates term and cumulative GPAs based on the official KISJ grading scale.
 - **Result Exporting System**: Allows users to export the result as PDF, JPG, Excel, and CSV.
 - **Customizable User Input**: Allows users to customize Quarters, Subjects, The number of assesment, etc to best fit their current situation.
+- **Importing Previous Result**: Allows users to import their previous result so they don't have to enter every scores every time.
 - **Community Deployment**: Designed for lightweight distribution and usage within the school student community.
 
 ---
