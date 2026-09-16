@@ -18,7 +18,8 @@ The underlying calculation logic was structured based on official school syllabu
 
 # Key Features
 
-- **GPA/Letter Grade Calculation**: Calculates term and cumulative GPAs based on the official KISJ grading scale.
+- **GPA/Letter Grade Calculation**: Calculates term and cumulative GPAs based on the official KISJ letter grade policy (A+ 98-100 ... D- 60-62, F 50-59, NG below 50).
+- **Overwrite Policy**: Tick "Apply Overwrite Policy" on any formative score and pair it with a summative; when the summative is higher, the formative counts as that score. Pairings are kept in exported reports and restored on import.
 - **Result Exporting System**: Allows users to export the result as PDF, JPG, Excel, and CSV.
 - **Customizable User Input**: Allows users to customize Quarters, Subjects, The number of assesment, etc to best fit their current situation.
 - **Community Deployment**: Designed for lightweight distribution and usage within the school student community.

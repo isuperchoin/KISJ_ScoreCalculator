@@ -11,7 +11,8 @@ to Google Sheets) with no third-party libraries:
   * JPG   - a one-page, A4-wide PDF rasterized by macOS `sips`.
 
 Every report ends with a "Scores entered" table listing each score as typed,
-so grade_import can read the file back into the calculator later.
+so grade_import can read the file back into the calculator later. A formative
+under the overwrite policy is written as "90 (S2)": paired with summative 2.
 
 A "document" is the plain dictionary produced by build_document():
 
@@ -102,6 +103,8 @@ def build_document(reports, letter_and_gpa, average, quarter_count):
         })
 
     tables.append(_entered_table(reports, quarter_count))
+    if _uses_overwrite(reports):
+        tables.append(OVERWRITE_LEGEND)
 
     return {
         "title": "KISJ Grade Report",
@@ -119,9 +122,31 @@ def _round(value):
 # row per class, quarter and category. It is what lets a saved report be
 # imported back into the calculator later (see grade_import) and picked up
 # where it was left; the averages above it are not enough to rebuild the
-# individual scores.
+# individual scores. A formative with the overwrite policy applied carries
+# its paired summative after it - "90 (S2)" - so that comes back too.
 
 ENTERED_HEADERS = ["Class", "Quarter", "Category", "Scores"]
+
+OVERWRITE_LEGEND = {
+    "name": "Overwrite policy",
+    "headers": ["A formative score marked (S2) is paired with that quarter's "
+                "summative 2."],
+    "rows": [["Where the paired summative is higher, the formative counts as that "
+              "score instead."]],
+    "bold_rows": set(),
+}
+
+
+def entered_score_text(score, link=None):
+    """One score the way the "Scores entered" table lists it."""
+    return str(score) if link is None else "%d (S%d)" % (score, link)
+
+
+def _uses_overwrite(reports):
+    return any(link is not None
+               for _name, report in reports
+               for _f, _s, links in report.get("entered", {}).values()
+               for link in links)
 
 
 def _entered_table(reports, quarter_count):
@@ -137,21 +162,24 @@ def _entered_table(reports, quarter_count):
     for name, report in reports:
         entered = report.get("entered", {})
         for number in range(1, quarter_count + 1):
-            formatives, summatives = entered.get(number, ([], []))
-            for category, scores in (("Formative", formatives), ("Summative", summatives)):
-                for chunk in _score_chunks(scores, room):
+            formatives, summatives, links = entered.get(number, ([], [], []))
+            links = list(links) + [None] * (len(formatives) - len(links))
+            pieces = (("Formative", [entered_score_text(score, link)
+                                     for score, link in zip(formatives, links)]),
+                      ("Summative", [entered_score_text(score) for score in summatives]))
+            for category, texts in pieces:
+                for chunk in _score_chunks(texts, room):
                     rows.append([name, "Quarter %d" % number, category, chunk])
     return {"name": "Scores entered", "headers": list(ENTERED_HEADERS),
             "rows": rows, "bold_rows": set()}
 
 
-def _score_chunks(scores, room):
+def _score_chunks(pieces, room):
     """"90, 85, 77" split into pieces no longer than `room` characters."""
-    if not scores:
+    if not pieces:
         return [None]
     chunks, current = [], ""
-    for score in scores:
-        piece = str(score)
+    for piece in pieces:
         joined = piece if not current else current + ", " + piece
         if current and len(joined) > room:
             chunks.append(current)

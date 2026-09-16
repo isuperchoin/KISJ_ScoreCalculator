@@ -16,15 +16,18 @@ continued rather than typed from scratch. No third-party libraries:
 
 Every format ends up as plain text lines, and the same parser reads those.
 The "Scores entered" table at the foot of a report lists each score exactly
-as typed; older reports (saved before that table existed) only carry quarter
-averages, which are imported as one rounded score each and flagged.
+as typed - a formative under the overwrite policy as "90 (S2)", paired with
+summative 2; older reports (saved before that table existed) only carry
+quarter averages, which are imported as one rounded score each and flagged.
 
 read_report() returns:
 
     {"source": file name,
      "classes": [class name, ...],              in the order found
      "quarter_count": 1..4,
-     "scores": {class name: {quarter: ([formatives], [summatives])}},
+     "scores": {class name: {quarter: ([formatives], [summatives], [links])}},
+                                                links: paired summative or None,
+                                                one per formative
      "approximate": bool,                       True when built from averages
      "recognized": bool,                        True when read from a picture
      "warnings": [str, ...]}
@@ -132,7 +135,7 @@ def parse_lines(lines, known_classes=()):
         quarter_count = max([quarter_count] + list(per_quarter))
     for name in classes:
         for number in range(1, quarter_count + 1):
-            scores[name].setdefault(number, ([], []))
+            scores[name].setdefault(number, ([], [], []))
 
     return {"classes": classes, "quarter_count": quarter_count, "scores": scores,
             "approximate": approximate, "warnings": warnings}
@@ -157,8 +160,8 @@ def _entered_scores(lines):
         if not name or name.lower() == "class":
             continue
         quarter = int(match.group("quarter"))
-        column = 0 if match.group("category").lower() == "formative" else 1
-        values, doubtful = _score_list(match.group("scores"))
+        formative = match.group("category").lower() == "formative"
+        values, links, doubtful = _score_list(match.group("scores"))
         if doubtful:
             warnings.append("%s, Quarter %d, %s: part of the score list could not "
                             "be read (\"%s\")." % (name, quarter, match.group("category"),
@@ -167,20 +170,38 @@ def _entered_scores(lines):
             scores[name] = {}
             order.append(name)
         # A long list is written over several rows; they simply run on.
-        pair = scores[name].setdefault(quarter, ([], []))
-        pair[column].extend(values)
+        entry = scores[name].setdefault(quarter, ([], [], []))
+        if formative:
+            entry[0].extend(values)
+            entry[2].extend(links)
+        else:
+            entry[1].extend(values)
     return scores, order, warnings
 
 
+# One score in the list, with the overwrite pairing it may carry: "90 (S2)".
+# Text recognition tends to read the S as a 5 or a dollar sign, so those are
+# accepted too.
+SCORE_ITEM = re.compile(r"(?P<score>\d+)(?:\s*\(\s*[Ss5$]?\s*(?P<link>\d{1,2})\s*\))?")
+
+
 def _score_list(text):
-    """"90, 85, 100" -> ([90, 85, 100], doubtful). A dash means no scores."""
+    """"90 (S1), 85, 100" -> ([90, 85, 100], [1, None, None], doubtful).
+    A dash means no scores."""
     text = text.strip()
     if not text or text in ("-", ":", ".", "•"):
-        return [], False
-    values = [int(part) for part in re.findall(r"\d+", text)]
-    values = [value for value in values if 0 <= value <= 100]
-    leftovers = re.sub(r"[\d,\s.;/|-]", "", text)
-    return values, bool(leftovers) or not values
+        return [], [], False
+    values, links = [], []
+    for match in SCORE_ITEM.finditer(text):
+        value = int(match.group("score"))
+        if not 0 <= value <= 100:
+            continue
+        values.append(value)
+        link = match.group("link")
+        links.append(int(link) if link and int(link) > 0 else None)
+    leftovers = SCORE_ITEM.sub("", text)
+    leftovers = re.sub(r"[\d,\s.;/|-]", "", leftovers)
+    return values, links, bool(leftovers) or not values
 
 
 def _average_scores(lines):
@@ -215,7 +236,8 @@ def _average_scores(lines):
         formative = _as_whole(tokens[0] if tokens else "")
         summative = _as_whole(tokens[1] if len(tokens) > 1 else "")
         scores[current][quarter] = ([formative] if formative is not None else [],
-                                    [summative] if summative is not None else [])
+                                    [summative] if summative is not None else [],
+                                    [None] if formative is not None else [])
     return scores, order, warnings
 
 
@@ -254,10 +276,11 @@ def _match_names(order, scores, known_classes, warnings):
                                 "written." % raw)
         if name in matched:
             # The same class twice (e.g. a garbled duplicate): merge the scores.
-            for quarter, (formatives, summatives) in scores[raw].items():
-                pair = matched[name].setdefault(quarter, ([], []))
-                pair[0].extend(formatives)
-                pair[1].extend(summatives)
+            for quarter, (formatives, summatives, links) in scores[raw].items():
+                entry = matched[name].setdefault(quarter, ([], [], []))
+                entry[0].extend(formatives)
+                entry[1].extend(summatives)
+                entry[2].extend(links)
             continue
         matched[name] = scores[raw]
         classes.append(name)
@@ -274,12 +297,16 @@ def summary_text(result):
     for name in result["classes"]:
         parts = []
         for quarter in range(1, result["quarter_count"] + 1):
-            formatives, summatives = result["scores"][name].get(quarter, ([], []))
+            formatives, summatives, links = result["scores"][name].get(
+                quarter, ([], [], []))
             if not formatives and not summatives:
                 parts.append("Q%d: nothing" % quarter)
             else:
-                parts.append("Q%d: %d formative, %d summative"
-                             % (quarter, len(formatives), len(summatives)))
+                paired = sum(1 for link in links if link is not None)
+                parts.append("Q%d: %d formative%s, %d summative"
+                             % (quarter, len(formatives),
+                                " (%d with overwrite policy)" % paired if paired else "",
+                                len(summatives)))
         lines.append("• %s  -  %s" % (name, " · ".join(parts)))
     count = result["quarter_count"]
     lines.append("")

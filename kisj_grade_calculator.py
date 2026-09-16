@@ -13,6 +13,9 @@ several at once.
     Page 4  All results together
 
 Weighting:  Formative = 20%   |   Summative = 80%
+Overwrite policy: a formative paired with a summative counts as that
+summative's score when it is higher (ticked per formative score).
+Letter grades: KISJ letter grade policy (A+ 98 ... D- 60, F 50-59, NG below).
 Course list: KISJ High School Course Guide 2026-2027.
 
 Run with a Python that has tkinter:   /usr/bin/python3 kisj_grade_calculator.py
@@ -160,9 +163,10 @@ COURSES = {
 FORMATIVE_WEIGHT = 0.20
 SUMMATIVE_WEIGHT = 0.80
 
-# (minimum rounded percent, letter, gpa points) -- unweighted 4.0 scale
+# (minimum rounded percent, letter, gpa points) -- unweighted 4.0 scale.
+# KISJ letter grade policy: an F runs from 50 to 59; below that is NG (no grade).
 GRADE_SCALE = [
-    (97, "A+", 4.0),
+    (98, "A+", 4.0),
     (93, "A", 4.0),
     (90, "A-", 3.7),
     (87, "B+", 3.3),
@@ -174,7 +178,8 @@ GRADE_SCALE = [
     (67, "D+", 1.3),
     (63, "D", 1.0),
     (60, "D-", 0.7),
-    (0, "F", 0.0),
+    (50, "F", 0.0),
+    (0, "NG", 0.0),
 ]
 
 QUARTER_CHOICES = [
@@ -210,11 +215,32 @@ def letter_and_gpa(score):
     for minimum, letter, gpa in GRADE_SCALE:
         if rounded >= minimum:
             return letter, gpa
-    return "F", 0.0
+    return "NG", 0.0
 
 
 def average(values):
     return sum(values) / len(values) if values else None
+
+
+def apply_overwrite(formatives, summatives, links):
+    """The overwrite policy.
+
+    links runs parallel to formatives: None where the policy is off, otherwise
+    the 1-based position of the summative that formative is paired with. A
+    paired formative counts as its summative's score whenever that is higher.
+
+    Returns (the formative scores as they count, how many were raised). A link
+    that points past the summatives entered is simply left alone.
+    """
+    counted, raised = [], 0
+    for index, score in enumerate(formatives):
+        link = links[index] if index < len(links) else None
+        if link is not None and 1 <= link <= len(summatives) and summatives[link - 1] > score:
+            counted.append(summatives[link - 1])
+            raised += 1
+        else:
+            counted.append(score)
+    return counted, raised
 
 
 def weighted_score(formatives, summatives):
@@ -257,22 +283,27 @@ def validate_score(text):
 def summarize(quarter_data):
     """Build one class's report.
 
-    quarter_data maps quarter number -> (formative scores, summative scores).
+    quarter_data maps quarter number -> (formative scores, summative scores,
+    overwrite links) - see apply_overwrite() for the links.
     Returns a dict with per-quarter rows, semester rows, the overall total, and
     the scores as entered (which the saved report lists so it can be imported).
     """
     quarters = {}
     rows = []
     for number in sorted(quarter_data):
-        formatives, summatives = quarter_data[number]
-        score, note = weighted_score(formatives, summatives)
+        formatives, summatives, links = quarter_data[number]
+        counted, raised = apply_overwrite(formatives, summatives, links)
+        score, note = weighted_score(counted, summatives)
         if score is None:
             rows.append({"period": "Quarter %d" % number, "formative": None,
                          "summative": None, "score": None, "note": note})
             continue
+        if raised:
+            note = "overwrite policy raised %d formative score%s" % (
+                raised, "" if raised == 1 else "s")
         quarters[number] = score
         rows.append({"period": "Quarter %d" % number,
-                     "formative": average(formatives),
+                     "formative": average(counted),
                      "summative": average(summatives),
                      "score": score, "note": note})
 
@@ -295,8 +326,8 @@ def summarize(quarter_data):
         rows.append({"period": label, "formative": None, "summative": None,
                      "score": total, "note": "average of all quarters entered"})
 
-    entered = {number: (list(formatives), list(summatives))
-               for number, (formatives, summatives) in quarter_data.items()}
+    entered = {number: (list(formatives), list(summatives), list(links))
+               for number, (formatives, summatives, links) in quarter_data.items()}
     return {"rows": rows, "quarters": quarters, "semesters": semesters, "total": total,
             "entered": entered}
 
@@ -563,52 +594,139 @@ class SmoothScroll:
 
 
 class AssessmentRow:
-    """One score entry: a numbered box, an error message, and a remove button."""
+    """One score entry: a numbered box, an error message, and a remove button.
 
-    def __init__(self, parent, category, on_remove):
+    A formative row also carries the overwrite policy: an "Apply Overwrite
+    Policy" box and, once it is ticked, a picker for the summative this
+    formative is paired with. See apply_overwrite() for what that does.
+    """
+
+    def __init__(self, parent, category, on_remove, pairable=False, on_change=None):
         self.category = category
         self.on_remove = on_remove
+        self.on_change = on_change
         # True while the box still holds a value read from a saved report; the
         # tint tells the user which numbers they have not yet looked at.
         self.imported = False
 
         self.frame = tk.Frame(parent, bg=CARD)
         self.frame.pack(fill="x", pady=1)
+        line = tk.Frame(self.frame, bg=CARD)
+        line.pack(fill="x")
 
-        self.label = tk.Label(self.frame, text="", width=14, anchor="w",
-                              bg=CARD, fg=MUTED)
+        self.label = tk.Label(line, text="", width=14, anchor="w", bg=CARD, fg=MUTED)
         self.label.pack(side="left")
 
         self.var = tk.StringVar()
-        self.entry = tk.Entry(self.frame, textvariable=self.var, width=7,
+        self.entry = tk.Entry(line, textvariable=self.var, width=7,
                               justify="center", relief="solid", bd=1,
                               highlightthickness=1, highlightbackground="#c9d3de",
                               highlightcolor=ACCENT)
         self.entry.pack(side="left")
 
-        tk.Label(self.frame, text="/100", bg=CARD, fg=MUTED).pack(side="left", padx=(4, 8))
+        # "85 (100)": the score this formative counts as once the overwrite
+        # policy has raised it to its paired summative. Blank otherwise.
+        self.raised = tk.Label(line, text="", bg=CARD, fg=GREEN,
+                               font=("Helvetica", 12, "bold"))
+        self.raised.pack(side="left", padx=(4, 0))
 
-        self.remove_btn = TextButton(self.frame, "✕", self._remove, bg=CARD,
+        tk.Label(line, text="/100", bg=CARD, fg=MUTED).pack(side="left", padx=(4, 8))
+
+        self.remove_btn = TextButton(line, "✕", self._remove, bg=CARD,
                                      fg=MUTED, hover_fg=RED, padx=4)
         self.remove_btn.pack(side="left")
 
-        self.error = tk.Label(self.frame, text="", bg=CARD, fg=RED, anchor="w",
+        self.error = tk.Label(line, text="", bg=CARD, fg=RED, anchor="w",
                               wraplength=340, justify="left")
         self.error.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        # The overwrite policy controls sit on a second line under the box,
+        # indented to the box, so the row stays readable at any window width.
+        self.pairable = pairable
+        self.overwrite_var = tk.BooleanVar(value=False)
+        self.link_var = tk.StringVar(value="S1")
+        self._summative_count = 1
+        if pairable:
+            policy = tk.Frame(self.frame, bg=CARD)
+            policy.pack(fill="x", padx=(self.label.winfo_reqwidth(), 0))
+            self.overwrite_box = tk.Checkbutton(
+                policy, text="Apply Overwrite Policy", variable=self.overwrite_var,
+                command=self._on_overwrite_toggled, bg=CARD, fg=INK,
+                activebackground=CARD, activeforeground=INK, highlightthickness=0)
+            self.overwrite_box.pack(side="left")
+            self.pair_holder = tk.Frame(policy, bg=CARD)
+            tk.Label(self.pair_holder, text="paired with", bg=CARD, fg=MUTED
+                     ).pack(side="left", padx=(6, 4))
+            self.link_box = ttk.Combobox(self.pair_holder, textvariable=self.link_var,
+                                         state="readonly", width=4, values=["S1"])
+            self.link_box.pack(side="left")
+            self.link_box.bind("<<ComboboxSelected>>", lambda _e: self._changed())
 
         # Live validation. A variable trace registers a command inside the Tcl
         # interpreter that keeps this row alive even after the widget is gone,
         # so dispose() must remove it - see the dispose chain below.
-        self._trace = self.var.trace_add("write", lambda *_: self.check())
+        self._trace = self.var.trace_add("write",
+                                         lambda *_: (self.check(), self._changed()))
         self.entry.bind("<KeyPress>", self._touched)
         self.entry.bind("<KeyRelease>", lambda _e: self.check())
         self.entry.bind("<FocusOut>", lambda _e: self.check())
 
-    def set_value(self, text, imported=False):
+    def set_value(self, text, imported=False, link=None):
         """Fill the box programmatically (from a saved report, or when the
-        page is rebuilt); the trace repaints it."""
+        page is rebuilt); the trace repaints it. link is the 1-based summative
+        this formative is paired with under the overwrite policy, or None."""
         self.imported = imported
-        self.var.set(text)
+        if self.pairable:
+            self.overwrite_var.set(link is not None)
+            if link is not None:
+                self.link_var.set("S%d" % min(max(1, link), self._summative_count))
+            self._on_overwrite_toggled(notify=False)
+        self.var.set(text)      # the trace repaints the box and the marker
+
+    # -- overwrite policy -----------------------------------------------------
+
+    def _on_overwrite_toggled(self, notify=True):
+        if not self.pairable:
+            return
+        if self.overwrite_var.get():
+            self.pair_holder.pack(side="left")
+        else:
+            self.pair_holder.pack_forget()
+        if notify:
+            self._changed()
+
+    def _changed(self):
+        if self.on_change is not None:
+            self.on_change()
+
+    def set_summative_count(self, count):
+        """Offer S1..S<count> in the picker; a pairing that no longer exists
+        falls back to the last summative there is."""
+        if not self.pairable:
+            return
+        count = max(1, count)
+        self._summative_count = count
+        self.link_box.config(values=["S%d" % n for n in range(1, count + 1)])
+        if self.link() is not None and self.link() > count:
+            self.link_var.set("S%d" % count)
+
+    def show_raised(self, score):
+        """Show the score this formative now counts as, or clear it."""
+        self.raised.config(text="" if score is None else "(%d)" % score)
+
+    def value(self):
+        """The typed score as a number, or None if blank or invalid."""
+        return validate_score(self.var.get())[0]
+
+    def link(self):
+        """The summative number this formative is paired with, or None when
+        the overwrite policy is off for this row."""
+        if not self.pairable or not self.overwrite_var.get():
+            return None
+        try:
+            return int(self.link_var.get().lstrip("S"))
+        except ValueError:
+            return 1
 
     def _touched(self, event):
         """The user typed here: whatever was imported is now theirs."""
@@ -653,11 +771,19 @@ class AssessmentRow:
 
 
 class CategoryBlock:
-    """A titled group of assessment rows (Formative or Summative)."""
+    """A titled group of assessment rows (Formative or Summative).
 
-    def __init__(self, parent, category, weight_text):
+    pairable marks the formative side, whose rows carry the overwrite policy.
+    on_change is called whenever the rows come or go (the formative side needs
+    to know how many summatives there are to pair with).
+    """
+
+    def __init__(self, parent, category, weight_text, pairable=False, on_change=None):
         self.category = category
+        self.pairable = pairable
+        self.on_change = on_change
         self.rows = []
+        self._summative_count = 1    # how many summatives a formative can pair with
 
         self.frame = tk.LabelFrame(parent, text="  %s  -  %s  " % (category, weight_text),
                                    bg=CARD, fg=ACCENT, bd=1, relief="solid",
@@ -673,12 +799,19 @@ class CategoryBlock:
 
         self.add_row(focus=False)
 
-    def add_row(self, focus=True):
-        row = AssessmentRow(self.rows_holder, self.category, self._on_remove)
+    def _new_row(self):
+        row = AssessmentRow(self.rows_holder, self.category, self._on_remove,
+                            pairable=self.pairable, on_change=self.on_change)
+        row.set_summative_count(self._summative_count)
         self.rows.append(row)
+        return row
+
+    def add_row(self, focus=True):
+        row = self._new_row()
         self._renumber()
         if focus:
             row.focus()
+        self._changed()
 
     def _on_remove(self, row):
         if row in self.rows:
@@ -687,10 +820,21 @@ class CategoryBlock:
             self.add_row(focus=False)
         else:
             self._renumber()
+            self._changed()
 
     def _renumber(self):
         for index, row in enumerate(self.rows, start=1):
             row.set_number(index)
+
+    def _changed(self):
+        if self.on_change is not None:
+            self.on_change()
+
+    def set_summative_count(self, count):
+        """Formative side only: how many summatives the rows can pair with."""
+        self._summative_count = count
+        for row in self.rows:
+            row.set_summative_count(count)
 
     def dispose(self):
         for row in self.rows:
@@ -698,25 +842,31 @@ class CategoryBlock:
         self.rows = []
 
     def set_scores(self, entries):
-        """Replace every box with one per entry: (text, imported) pairs."""
+        """Replace every box with one per entry: (text, imported, link)
+        triples, link being the paired summative number or None."""
         self.dispose()
-        for text, imported in entries:
-            row = AssessmentRow(self.rows_holder, self.category, self._on_remove)
-            self.rows.append(row)
-            row.set_value(text, imported)
+        for text, imported, link in entries:
+            row = self._new_row()
+            row.set_value(text, imported, link)
         if not self.rows:            # always keep at least one box
             self.add_row(focus=False)
         else:
             self._renumber()
+            self._changed()
 
     def snapshot(self):
-        """(text, imported) for every box that has something in it."""
-        return [(row.var.get(), row.imported) for row in self.rows
+        """(text, imported, link) for every box that has something in it;
+        link is the paired summative's row number, or None."""
+        return [(row.var.get(), row.imported, row.link()) for row in self.rows
                 if row.var.get().strip()]
 
     def collect(self):
-        """Returns (scores, first_bad_row). first_bad_row is None when all valid."""
-        scores = []
+        """Returns (scores, links, first_bad_row).
+
+        links runs parallel to scores and holds each row's paired summative
+        row number (or None); first_bad_row is None when every row is valid.
+        """
+        scores, links = [], []
         first_bad = None
         for row in self.rows:
             value, error = row.check()
@@ -724,11 +874,28 @@ class CategoryBlock:
                 first_bad = row
             elif value is not None:
                 scores.append(value)
-        return scores, first_bad
+                links.append(row.link())
+        return scores, links, first_bad
+
+    def filled_numbers(self):
+        """Row numbers (1-based) of the rows with anything typed in them."""
+        return [number for number, row in enumerate(self.rows, start=1)
+                if row.var.get().strip()]
+
+    def valid_numbers(self):
+        """Row numbers (1-based) of the rows holding a valid score."""
+        return [number for number, row in enumerate(self.rows, start=1)
+                if row.check()[0] is not None]
 
 
 class QuarterBlock:
-    """One quarter: a formative column and a summative column."""
+    """One quarter: a formative column and a summative column.
+
+    The formative rows pair with summatives by row number ("S2" is the second
+    summative box). Blank boxes are dropped when the scores are gathered, so
+    on the way out a pairing is renumbered to the position of its summative
+    among the boxes that count - which is also how the saved report lists it.
+    """
 
     def __init__(self, parent, number):
         self.number = number
@@ -741,20 +908,59 @@ class QuarterBlock:
         columns = tk.Frame(self.frame, bg=CARD)
         columns.pack(fill="x")
 
-        self.formative = CategoryBlock(columns, "Formative", "20% of the quarter")
-        self.summative = CategoryBlock(columns, "Summative", "80% of the quarter")
+        # Each block reports its first row while it is still being built, so
+        # the handlers below wait until both exist.
+        self.formative = self.summative = None
+        self.formative = CategoryBlock(columns, "Formative", "20% of the quarter",
+                                       pairable=True, on_change=self._refresh_raised)
+        self.summative = CategoryBlock(columns, "Summative", "80% of the quarter",
+                                       on_change=self._summatives_changed)
+        self._summatives_changed()
+
+    def _summatives_changed(self):
+        """Keep the formative pairing pickers in step with the summative rows."""
+        if self.summative is not None:
+            self.formative.set_summative_count(len(self.summative.rows))
+        self._refresh_raised()
+
+    def _refresh_raised(self):
+        """Mark every formative the overwrite policy currently raises, live:
+        "85 (100)" as soon as the paired summative is higher."""
+        if self.formative is None or self.summative is None:
+            return
+        for row in self.formative.rows:
+            raised, link, score = None, row.link(), row.value()
+            if link is not None and score is not None and link <= len(self.summative.rows):
+                paired = self.summative.rows[link - 1].value()
+                if paired is not None and paired > score:
+                    raised = paired
+            row.show_raised(raised)
+
+    @staticmethod
+    def _renumber(links, kept):
+        """Summative row numbers -> positions among the rows in `kept`."""
+        return [kept.index(link) + 1 if link is not None and link in kept else None
+                for link in links]
 
     def collect(self):
-        formatives, bad_f = self.formative.collect()
-        summatives, bad_s = self.summative.collect()
-        return formatives, summatives, (bad_f or bad_s)
+        formatives, links, bad_f = self.formative.collect()
+        summatives, _links, bad_s = self.summative.collect()
+        links = self._renumber(links, self.summative.valid_numbers())
+        return formatives, summatives, links, (bad_f or bad_s)
 
     def fill(self, formatives, summatives):
-        self.formative.set_scores(formatives)
+        """Each argument is a list of (text, imported, link) triples. The
+        summatives go in first so the pairing pickers have them to offer."""
         self.summative.set_scores(summatives)
+        self.formative.set_scores(formatives)
 
     def snapshot(self):
-        return self.formative.snapshot(), self.summative.snapshot()
+        entries = self.formative.snapshot()
+        links = self._renumber([link for _t, _i, link in entries],
+                               self.summative.filled_numbers())
+        formatives = [(text, imported, link)
+                      for (text, imported, _l), link in zip(entries, links)]
+        return formatives, self.summative.snapshot()
 
     def dispose(self):
         self.formative.dispose()
@@ -1018,7 +1224,10 @@ class ScoresPage(Page):
         self.class_name = class_name
         self.title = "Step 3  ·  Scores for %s" % class_name
         self.subtitle = ("Class %d of %d.   Add as many assessments as you took. "
-                         "Leave a box blank to skip it. Whole numbers from 0 to 100."
+                         "Leave a box blank to skip it. Whole numbers from 0 to 100.   "
+                         "Tick \"Apply Overwrite Policy\" on a formative and pick the "
+                         "summative it goes with: when that summative is higher, the "
+                         "formative counts as that score instead."
                          % (index, total))
         Page.__init__(self, app, parent)
 
@@ -1095,26 +1304,31 @@ class ScoresPage(Page):
     # -- filling in from a saved report ---------------------------------------
 
     def fill(self, quarter_data, imported=False):
-        """quarter_data maps quarter number -> (formatives, summatives), each a
-        list of scores or of (text, imported) pairs."""
+        """quarter_data maps quarter number -> (formatives, summatives, links).
+
+        The scores are plain numbers (from a saved report, with the overwrite
+        links alongside) or (text, imported, link) triples (from snapshot(),
+        where the link already sits inside each formative entry).
+        """
         for block in self.quarter_blocks:
-            formatives, summatives = quarter_data.get(block.number, ([], []))
-            block.fill(self._entries(formatives, imported),
-                       self._entries(summatives, imported))
+            formatives, summatives, links = quarter_data.get(block.number, ([], [], []))
+            block.fill(self._entries(formatives, imported, links),
+                       self._entries(summatives, imported, []))
 
     @staticmethod
-    def _entries(values, imported):
+    def _entries(values, imported, links):
         entries = []
-        for value in values:
+        for index, value in enumerate(values):
             if isinstance(value, tuple):
-                entries.append((str(value[0]), bool(value[1])))
+                entries.append((str(value[0]), bool(value[1]), value[2]))
             else:
-                entries.append((str(value), imported))
+                link = links[index] if index < len(links) else None
+                entries.append((str(value), imported, link))
         return entries
 
     def snapshot(self):
         """Everything typed so far, so the page can be rebuilt without loss."""
-        return {block.number: block.snapshot() for block in self.quarter_blocks}
+        return {block.number: block.snapshot() + ([],) for block in self.quarter_blocks}
 
     def has_scores(self):
         return any(block.formative.snapshot() or block.summative.snapshot()
@@ -1137,8 +1351,8 @@ class ScoresPage(Page):
         bad_number = None
         bad_row = None
         for block in self.quarter_blocks:
-            formatives, summatives, bad = block.collect()
-            data[block.number] = (formatives, summatives)
+            formatives, summatives, links, bad = block.collect()
+            data[block.number] = (formatives, summatives, links)
             if bad is not None and bad_row is None:
                 bad_number, bad_row = block.number, bad
         return data, bad_number, bad_row
@@ -1597,11 +1811,14 @@ class ResultsPage(Page):
             self._class_card(name, report)
 
         tk.Label(self.content,
-                 text="Letter grade and GPA use the unweighted 4.0 scale (A+ 97, A 93, "
-                      "A- 90, B+ 87, B 83, B- 80, C+ 77, C 73, C- 70, D+ 67, D 63, "
-                      "D- 60, F below 60), applied to the score rounded to the nearest "
-                      "whole number. The combined GPA is the average of the classes "
-                      "listed, treating every class as equal weight.",
+                 text="Letter grade and GPA follow the KISJ letter grade policy on the "
+                      "unweighted 4.0 scale (A+ 98, A 93, A- 90, B+ 87, B 83, B- 80, "
+                      "C+ 77, C 73, C- 70, D+ 67, D 63, D- 60, F 50-59, NG below 50), "
+                      "applied to the score rounded to the nearest whole number. A "
+                      "formative with the overwrite policy applied counts as its paired "
+                      "summative's score when that is higher. The combined GPA is the "
+                      "average of the classes listed, treating every class as equal "
+                      "weight.",
                  bg=BG, fg=MUTED, anchor="w", justify="left",
                  wraplength=900).pack(anchor="w", pady=(4, 0))
 
@@ -1749,6 +1966,7 @@ class GradeCalculatorApp:
         self.index = 0
         self._preview = None
         self.import_source = None
+        self.results_seen = False
 
         self._build_header()
         self._build_footer()
@@ -1834,8 +2052,7 @@ class GradeCalculatorApp:
 
         buttons = tk.Frame(footer, bg=BAND)
         buttons.pack(side="right", padx=18, pady=12)
-        self.back_button = AccentButton(buttons, "◀  Back", self.go_back,
-                                        base="#6b7a8c", hover="#7f8d9e", press="#54606f")
+        self.back_button = AccentButton(buttons, "◀  Back", self.go_back)
         self.back_button.pack(side="left", padx=(0, 10))
         self.next_button = AccentButton(buttons, "Next  ▶", self.go_next)
         self.next_button.pack(side="left")
@@ -2001,6 +2218,8 @@ class GradeCalculatorApp:
             page.hide()
         self.index = index
         page = pages[index]
+        if isinstance(page, ResultsPage):
+            self.results_seen = True
         page.on_enter()
         page.show()
         self.scroller.stop()
@@ -2022,10 +2241,13 @@ class GradeCalculatorApp:
             active = 2
         else:
             active = 3
+        # A step is green once it has something in it, so going back does
+        # not grey out the steps that are already filled in.
+        done = self._steps_done()
         for position, chip in enumerate(self.step_chips):
             if position == active:
                 chip.config(bg=ACCENT, fg="white")
-            elif position < active:
+            elif position < active or done[position]:
                 chip.config(bg=GREEN, fg="white")
             else:
                 chip.config(bg="#dfe5ec", fg=MUTED)
@@ -2048,6 +2270,14 @@ class GradeCalculatorApp:
             self.next_button.set_text("Next  ▶")
         self.next_button.set_enabled(
             not (isinstance(page, ClassesPage) and not self.classes))
+
+    def _steps_done(self):
+        """Which of the four steps have content: classes chosen, quarters
+        confirmed (score pages built), any score typed, results seen."""
+        return [bool(self.classes),
+                bool(self.score_pages),
+                any(page.has_scores() for page in self.score_pages),
+                self.results_seen]
 
     # -- navigation ---------------------------------------------------------
 
@@ -2106,6 +2336,7 @@ class GradeCalculatorApp:
         self.classes = []
         self.quarter_var.set(QUARTER_CHOICES[1])
         self.import_source = None
+        self.results_seen = False
         self.classes_page.set_import_status("")
         self.show_page(0)
 
