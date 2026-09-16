@@ -2022,13 +2022,22 @@ class GradeCalculatorApp:
         inner = tk.Frame(strip, bg=BAND)
         inner.pack(anchor="w", padx=18, pady=8)
         self.step_chips = []
+        self.chip_colors = []
         for position, text in enumerate(self.STEP_LABELS):
             if position:
                 tk.Label(inner, text="  ▸  ", bg=BAND, fg="#9aa8b8").pack(side="left")
             chip = tk.Label(inner, text=text, bg="#dfe5ec", fg=MUTED, padx=12, pady=4,
                             font=("Helvetica", 11, "bold"))
             chip.pack(side="left")
+            # Every chip answers a click, the locked ones by saying what they
+            # are still waiting for, so none of them is simply dead.
+            chip.bind("<ButtonRelease-1>", lambda _e, step=position: self.go_to_step(step))
+            chip.bind("<Enter>", lambda _e, step=position: self._hover_chip(step, True))
+            chip.bind("<Leave>", lambda _e, step=position: self._hover_chip(step, False))
             self.step_chips.append(chip)
+            self.chip_colors.append(("#dfe5ec", MUTED))
+        tk.Label(inner, text="   click a step to go to it", bg=BAND, fg="#8b98a8"
+                 ).pack(side="left")
         # Apple's system Python still ships Tk 8.5, which predates macOS
         # precise trackpad scrolling: two-finger scrolling sends this program
         # nothing at all. Say so rather than let it look broken.
@@ -2233,24 +2242,21 @@ class GradeCalculatorApp:
         page = pages[self.index]
 
         # step chips
-        if isinstance(page, ClassesPage):
-            active = 0
-        elif isinstance(page, QuartersPage):
-            active = 1
-        elif isinstance(page, ScoresPage):
-            active = 2
-        else:
-            active = 3
+        active = self._step_of(page)
         # A step is green once it has something in it, so going back does
         # not grey out the steps that are already filled in.
         done = self._steps_done()
         for position, chip in enumerate(self.step_chips):
             if position == active:
-                chip.config(bg=ACCENT, fg="white")
+                colors = (ACCENT, "white")
             elif position < active or done[position]:
-                chip.config(bg=GREEN, fg="white")
+                colors = (GREEN, "white")
             else:
-                chip.config(bg="#dfe5ec", fg=MUTED)
+                colors = ("#dfe5ec", MUTED)
+            self.chip_colors[position] = colors
+            chip.config(bg=colors[0], fg=colors[1],
+                        cursor="hand2" if self._step_reachable(position)
+                               and position != active else "arrow")
         if isinstance(page, ScoresPage) and len(self.score_pages) > 1:
             position = self.score_pages.index(page) + 1
             self.step_chips[2].config(text="3  Scores (%d/%d)"
@@ -2278,6 +2284,93 @@ class GradeCalculatorApp:
                 bool(self.score_pages),
                 any(page.has_scores() for page in self.score_pages),
                 self.results_seen]
+
+    # -- the step chips as buttons -------------------------------------------
+
+    # A chip lifts a shade while the pointer is over it, so it reads as
+    # something you can press.
+    CHIP_HOVER = {ACCENT: "#26559b", GREEN: "#3a9670", "#dfe5ec": "#cfd8e3"}
+
+    # What a locked step is still waiting for.
+    CHIP_LOCKED = [
+        "",
+        "Add at least one class first.",
+        "Add at least one class first.",
+        "Type at least one score first, then your results are ready.",
+    ]
+
+    @staticmethod
+    def _step_of(page):
+        """Which of the four steps a page belongs to."""
+        if isinstance(page, ClassesPage):
+            return 0
+        if isinstance(page, QuartersPage):
+            return 1
+        if isinstance(page, ScoresPage):
+            return 2
+        return 3
+
+    def _step_index(self, step):
+        """The page to open for a step: the first class for the scores step,
+        and the last page of all for the results."""
+        if step < 2:
+            return step
+        return 2 if step == 2 else len(self.pages()) - 1
+
+    def _step_reachable(self, step):
+        """A step can be opened once every step before it is finished.
+
+        Step 1 needs a class; the quarter count always has a value, so step 2
+        follows straight on from it; the results need a score somewhere.
+        """
+        if step <= 0:
+            return True
+        if not self.classes:
+            return False
+        if step >= 3:
+            return any(page.has_scores() for page in self.score_pages)
+        return True
+
+    def _hover_chip(self, step, over):
+        bg, fg = self.chip_colors[step]
+        if over and self._step_reachable(step) and step != self._step_of(
+                self.pages()[self.index]):
+            bg = self.CHIP_HOVER.get(bg, bg)
+        self.step_chips[step].config(bg=bg, fg=fg)
+
+    def go_to_step(self, step):
+        """Open a step from the chips at the top.
+
+        Going forward passes the same checks the Next button makes, so a step
+        is never skipped over and a bad score is never left behind; going back
+        is free, exactly like the Back button.
+        """
+        pages = self.pages()
+        page = pages[self.index]
+        if step == self._step_of(page):
+            return
+        if not self._step_reachable(step):
+            self.status.config(text=self.CHIP_LOCKED[step])
+            return
+
+        if step > self._step_of(page):
+            error = page.validate()
+            if error:
+                self.status.config(text=error)
+                return
+            if isinstance(page, ScoresPage):
+                # Every class has to be sound before the results, not just
+                # the one on screen.
+                for other in self.score_pages:
+                    error = other.validate()
+                    if error:
+                        self.show_page(pages.index(other))
+                        self.status.config(text=error)
+                        return
+
+        if step >= 2:
+            self.rebuild_score_pages()
+        self.show_page(self._step_index(step))
 
     # -- navigation ---------------------------------------------------------
 
