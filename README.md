@@ -22,6 +22,7 @@ The underlying calculation logic was structured based on official school syllabu
 - **Overwrite Policy**: Tick "Apply Overwrite Policy" on any formative score and pair it with a summative; when the summative is higher, the formative counts as that score. Pairings are kept in exported reports and restored on import.
 - **Result Exporting System**: Allows users to export the result as PDF, JPG, Excel, and CSV.
 - **Customizable User Input**: Allows users to customize Quarters, Subjects, The number of assesment, etc to best fit their current situation.
+- **Importing Previous Result**: Allows users to import their previous result so they don't have to enter every scores every time.
 - **Community Deployment**: Designed for lightweight distribution and usage within the school student community.
 
 ---
