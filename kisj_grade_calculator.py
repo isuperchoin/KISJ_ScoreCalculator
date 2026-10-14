@@ -1790,6 +1790,8 @@ class ResultsPage(Page):
         else:
             messagebox.showinfo("Saved", "Saved to:\n%s" % path)
         self.export_note.config(text="Last saved: %s" % os.path.basename(path))
+        # The results are on disk now, so closing need not ask about them.
+        self.app.mark_saved()
 
     def on_enter(self):
         for child in self.content.winfo_children():
@@ -1967,6 +1969,10 @@ class GradeCalculatorApp:
         self._preview = None
         self.import_source = None
         self.results_seen = False
+        # What the scores looked like when they last reached a file, so that
+        # closing can tell whether anything would be lost (see confirm_close).
+        self.saved_signature = None
+        self._closing = False
 
         self._build_header()
         self._build_footer()
@@ -1981,6 +1987,15 @@ class GradeCalculatorApp:
         root.bind("<KP_Enter>", self._on_return_key)
         root.bind("<Command-o>", lambda _e: self.import_report())
         root.bind("<Control-o>", lambda _e: self.import_report())
+
+        # Every way of closing goes through confirm_close: the red button, the
+        # keyboard shortcut, and the Quit item in the Mac menu bar.
+        root.protocol("WM_DELETE_WINDOW", self.confirm_close)
+        root.bind("<Command-w>", lambda _e: self.confirm_close())
+        try:
+            root.createcommand("::tk::mac::Quit", self.confirm_close)
+        except tk.TclError:          # not macOS: there is no such command
+            pass
 
     # -- chrome -------------------------------------------------------------
 
@@ -2417,6 +2432,70 @@ class GradeCalculatorApp:
         if 0 <= position < len(self.score_pages):
             self.show_page(2 + position)
 
+    # -- closing -------------------------------------------------------------
+
+    def _work_signature(self):
+        """Everything typed, as one comparable value: the classes, the number
+        of quarters, and every score with its overwrite pairing. Two equal
+        signatures mean nothing has changed since."""
+        return (tuple(self.classes), self.quarter_count(),
+                tuple((page.class_name, sorted(page.snapshot().items()))
+                      for page in self.score_pages))
+
+    def mark_saved(self):
+        """The scores now exist in a file - either just written, or just read
+        in from one - so there is nothing to lose until they change again."""
+        self.saved_signature = self._work_signature()
+
+    def unsaved_work(self):
+        """True when scores have been typed that no file holds."""
+        if not any(page.has_scores() for page in self.score_pages):
+            return False
+        return self._work_signature() != self.saved_signature
+
+    def confirm_close(self):
+        """Closing with results that were never saved: ask first.
+
+        Nothing the program writes is kept anywhere automatically, so quitting
+        really does lose the scores. The three answers are the usual ones: go
+        and save them, close anyway, or carry on working.
+
+        macOS can report one closing gesture twice - Command-W as a key press
+        and again as a window close - and the question runs a nested event
+        loop, so the guard keeps a second report from stacking another dialog
+        on top or from closing a window that has already gone.
+        """
+        if self._closing:
+            return
+        self._closing = True
+
+        if not self.unsaved_work():
+            self.root.destroy()
+            return
+
+        classes = sum(1 for page in self.score_pages if page.has_scores())
+        answer = messagebox.askyesnocancel(
+            "Save your results before closing?",
+            "The scores you entered for %d class%s have not been saved to a "
+            "file, and closing loses them - nothing is kept inside the app.\n\n"
+            "Yes  -  go to Step 4 and save them\n"
+            "No  -  close without saving\n"
+            "Cancel  -  carry on working"
+            % (classes, "" if classes == 1 else "es"),
+            icon=messagebox.WARNING, default=messagebox.CANCEL)
+
+        if answer is None:                     # Cancel: stay where we are
+            self._closing = False
+            return
+        if answer:                             # Yes: the export bar is there
+            self._closing = False
+            self.show_page(len(self.pages()) - 1)
+            self.status.config(
+                text="Pick a format under \u201cSave these results\u201d to save "
+                     "your scores - the file can be imported again later.")
+            return
+        self.root.destroy()
+
     def _on_return_key(self, _event=None):
         self.next_button.flash()
         self.go_next()
@@ -2430,6 +2509,7 @@ class GradeCalculatorApp:
         self.quarter_var.set(QUARTER_CHOICES[1])
         self.import_source = None
         self.results_seen = False
+        self.saved_signature = None
         self.classes_page.set_import_status("")
         self.show_page(0)
 
@@ -2504,6 +2584,9 @@ class GradeCalculatorApp:
                                  result["recognized"])
 
         self.import_source = source
+        # These scores came out of a file, so nothing is at risk until they
+        # are changed.
+        self.mark_saved()
         self.classes_page.set_import_status(
             "Imported %d class%s and %d quarter%s from %s." % (
                 len(self.classes), "" if len(self.classes) == 1 else "es",
